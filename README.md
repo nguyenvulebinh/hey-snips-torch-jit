@@ -1,6 +1,6 @@
-# Wake word Hey Snips with PyTorch JIT
+# Wake word detection "Hey Snips" with PyTorch JIT
 
-### [Hey Snips Dataset]((https://research.snips.ai/datasets/keyword-spotting))
+### [Hey Snips Dataset](https://research.snips.ai/datasets/keyword-spotting)
 
 |          |               |  Train |  Dev   |  Test  | 
 |----------|---------------|--------|--------|--------| 
