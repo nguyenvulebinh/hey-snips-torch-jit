@@ -81,7 +81,6 @@ class RealtimeDecoder():
 
     def start_decoding(self):
         def decode():
-            count_wav = 0
             while not self.continue_recording.is_set():
                 if self.audio_queue.qsize() > 0:
                     currunt_wavform = self.audio_queue.get()
@@ -96,7 +95,6 @@ class RealtimeDecoder():
                     score = feats.max().detach().numpy().tolist()
                     if score > 0.1:
                         print("Wake word detected. Score: {:.4f}".format(score))
-                        count_wav += 1
                     else:
                         print('.')
                 else:
