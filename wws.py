@@ -5,6 +5,7 @@ import queue
 import numpy as np
 import threading
 import time
+import math
 
 def int2float(sound):
     abs_max = np.abs(sound).max()
@@ -36,11 +37,28 @@ def compute_mfcc(
     )
     return mat
 
+def compute_fbank(waveform,
+                  feature_type='fbank',
+                  num_mel_bins=40,
+                  frame_length=25,
+                  frame_shift=10,
+                  dither=1.0,
+                  sample_rate=16000):
+    waveform = waveform * (1 << 15)
+    mat = kaldi.fbank(waveform,
+                        num_mel_bins=num_mel_bins,
+                        frame_length=frame_length,
+                        frame_shift=frame_shift,
+                        dither=dither,
+                        energy_floor=0.0,
+                        sample_frequency=sample_rate)
+    return mat
 
 class RealtimeDecoder():
 
     def __init__(self,
-        model_jit
+        model_jit,
+        inference_duration_s: float = 1.5
     ) -> None:
         self.model_jit = model_jit
         self.SAMPLE_RATE = 16000
@@ -52,6 +70,18 @@ class RealtimeDecoder():
         self.continue_recording = threading.Event()
         self.frame_duration_ms = 500
         self.audio_queue = queue.SimpleQueue()
+        self.inference_duration_s = inference_duration_s
+        
+        # fbank params from compute_fbank
+        frame_length_ms = 25
+        frame_shift_ms = 10
+        
+        # Calculate number of frames for inference window
+        duration_ms = self.inference_duration_s * 1000
+        self.num_frames_for_inference = int(((duration_ms - frame_length_ms) / frame_shift_ms) + 1)
+        
+        # Calculate number of chunks for buffer. Buffer must be >= inference window.
+        self.num_chunks_to_keep = math.ceil(self.inference_duration_s * 1000 / self.frame_duration_ms)
 
     def start_recording(self, wait_enter_to_stop=True):
         def stop():
@@ -69,7 +99,7 @@ class RealtimeDecoder():
                 audio_int16 = np.frombuffer(audio_chunk, np.int16)
                 audio_float32 = int2float(audio_int16)
                 waveform = torch.from_numpy(audio_float32)
-                self.audio_queue.put(waveform)
+                self.audio_queue.put((waveform, time.time()))
             print("Finish record")
             stream.close()
         if wait_enter_to_stop:
@@ -83,20 +113,36 @@ class RealtimeDecoder():
         def decode():
             while not self.continue_recording.is_set():
                 if self.audio_queue.qsize() > 0:
-                    currunt_wavform = self.audio_queue.get()
+                    currunt_wavform, timestamp = self.audio_queue.get()
                     self.cache_output['wavchunks'].append(currunt_wavform)
-                    self.cache_output['wavchunks'] = self.cache_output['wavchunks'][-2:]
+                    self.cache_output['wavchunks'] = self.cache_output['wavchunks'][-self.num_chunks_to_keep:]
                     wavform = torch.cat(self.cache_output['wavchunks'], dim=-1)
-                    feat = compute_mfcc(waveform=wavform.unsqueeze(0), sample_rate=self.SAMPLE_RATE)[-49:]
+
+                    # 1. Feature extraction latency
+                    feature_extraction_start = time.time()
+                    feat = compute_fbank(waveform=wavform.unsqueeze(0), sample_rate=self.SAMPLE_RATE)[-self.num_frames_for_inference:]
+                    feature_extraction_end = time.time()
+                    feature_extraction_latency = feature_extraction_end - feature_extraction_start
+
                     speech = feat.unsqueeze(0)
                     prob = self.cache_output['prob']
+
+                    # 2. Model inference latency
+                    inference_start = time.time()
                     feats, prob = self.model_jit.forward(speech, prob)
+                    inference_end = time.time()
+                    inference_latency = inference_end - inference_start
+
                     self.cache_output['prob'] = prob
                     score = feats.max().detach().numpy().tolist()
-                    if score > 0.1:
+                    
+                    # 3. Total latency
+                    total_latency = time.time() - timestamp
+
+                    if score > 0.5:
                         print("Wake word detected. Score: {:.4f}".format(score))
                     else:
-                        print('.')
+                        print(f"Latency - Total: {total_latency:.4f}s, Feature Extraction: {feature_extraction_latency:.4f}s, Inference: {inference_latency:.4f}s")
                 else:
                     time.sleep(0.01)
             print("Decode thread finish")
@@ -108,7 +154,7 @@ if __name__ == "__main__":
     model = torch.jit.load('model.zip').eval()
     print("Model loaded....")    
 
-    obj_decode = RealtimeDecoder(model)
+    obj_decode = RealtimeDecoder(model, inference_duration_s=1.0)
     recording_threads = obj_decode.start_recording()
     decode_thread = obj_decode.start_decoding()
     for thread in recording_threads:
